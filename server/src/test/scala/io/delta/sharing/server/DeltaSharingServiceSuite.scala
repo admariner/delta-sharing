@@ -31,6 +31,7 @@ import org.apache.commons.io.IOUtils
 import org.scalatest.{BeforeAndAfterAll, FunSuite}
 import scalapb.json4s.JsonFormat
 
+import io.delta.sharing.server.DeltaSharingService.DELTA_SHARING_INCLUDE_END_STREAM_ACTION
 import io.delta.sharing.server.common.JsonUtils
 import io.delta.sharing.server.common.actions.{ColumnMappingTableFeature, DeletionVectorDescriptor, DeletionVectorsTableFeature, DeltaAddFile, DeltaFormat, DeltaProtocol, DeltaSingleAction}
 import io.delta.sharing.server.config.ServerConfig
@@ -158,7 +159,7 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
     deltaSharingCapabilities += s";responseformat=$responseFormat"
     deltaSharingCapabilities += readerFeatures
     if (includeEndStreamAction) {
-      deltaSharingCapabilities += s";includeendstreamaction=true"
+      deltaSharingCapabilities += s";$DELTA_SHARING_INCLUDE_END_STREAM_ACTION=true"
     }
     connection.setRequestProperty("delta-sharing-capabilities", deltaSharingCapabilities)
 
@@ -187,7 +188,7 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
       val responseCapabilities = connection.getHeaderField("delta-sharing-capabilities")
       var expectedHeader = s"responseformat=$responseFormat"
       if (includeEndStreamAction) {
-        expectedHeader += s";includeendstreamaction=true"
+        expectedHeader += s";$DELTA_SHARING_INCLUDE_END_STREAM_ACTION=true"
       }
       assert(responseCapabilities == expectedHeader, s"Incorrect header: $responseCapabilities")
     }
@@ -707,10 +708,8 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
         asyncQuery = "true"
       )
 
-      var lines = response.split("\n")
+      val lines = response.split("\n")
       assert(lines.length == 4)
-
-      print(s"response: $response")
     }
   }
 
@@ -2896,18 +2895,34 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
 
   integrationTest("cdf_table_cdf_enabled_changes - query table changes") {
     Seq(
-      RESPONSE_FORMAT_PARQUET,
-      RESPONSE_FORMAT_DELTA,
-      s"$RESPONSE_FORMAT_DELTA,$RESPONSE_FORMAT_PARQUET",
-      s"$RESPONSE_FORMAT_PARQUET,$RESPONSE_FORMAT_DELTA"
-    ).foreach { responseFormat =>
+      (RESPONSE_FORMAT_PARQUET, true),
+      (RESPONSE_FORMAT_PARQUET, false),
+      (RESPONSE_FORMAT_DELTA, true),
+      (RESPONSE_FORMAT_DELTA, false),
+      (s"$RESPONSE_FORMAT_DELTA,$RESPONSE_FORMAT_PARQUET", true),
+      (s"$RESPONSE_FORMAT_DELTA,$RESPONSE_FORMAT_PARQUET", false),
+      (s"$RESPONSE_FORMAT_PARQUET,$RESPONSE_FORMAT_DELTA", true),
+      (s"$RESPONSE_FORMAT_PARQUET,$RESPONSE_FORMAT_DELTA", false)
+    ).foreach { case(responseFormat, includeEndStreamAction) =>
       val respondedFormat = if (responseFormat == RESPONSE_FORMAT_DELTA) {
         RESPONSE_FORMAT_DELTA
       } else {
         RESPONSE_FORMAT_PARQUET
       }
-      val response = readNDJson(requestPath(s"/shares/share8/schemas/default/tables/cdf_table_cdf_enabled/changes?startingVersion=0&endingVersion=3"), Some("GET"), None, Some(0), respondedFormat)
-      val lines = response.split("\n")
+      val response = readNDJson(
+        requestPath(s"/shares/share8/schemas/default/tables/cdf_table_cdf_enabled/changes?startingVersion=0&endingVersion=3"),
+        Some("GET"),
+        None,
+        Some(0),
+        respondedFormat,
+        includeEndStreamAction = includeEndStreamAction)
+      var lines = response.split("\n")
+      if (includeEndStreamAction) {
+        val endAction = JsonUtils.fromJson[SingleAction](lines.last).endStreamAction
+        assert(endAction != null)
+        assert(endAction.minUrlExpirationTimestamp != null)
+        lines = lines.dropRight(1)
+      }
       val protocol = lines(0)
       val metadata = lines(1)
       if (responseFormat == RESPONSE_FORMAT_DELTA) {
@@ -2986,13 +3001,18 @@ class DeltaSharingServiceSuite extends FunSuite with BeforeAndAfterAll {
   integrationTest("cdf_table_cdf_enabled_changes - paginated query table changes") {
     // version 1: 3 adds
     // version 2: 1 cdc
-    Seq(RESPONSE_FORMAT_PARQUET, RESPONSE_FORMAT_DELTA).foreach { responseFormat =>
+    Seq(
+      (RESPONSE_FORMAT_PARQUET, true),
+      (RESPONSE_FORMAT_PARQUET, false),
+      (RESPONSE_FORMAT_DELTA, true),
+      (RESPONSE_FORMAT_DELTA, false)).foreach { case (responseFormat, includeEndStreamAction) =>
       var response = readNDJson(
         requestPath("/shares/share8/schemas/default/tables/cdf_table_cdf_enabled/changes?startingVersion=0&endingVersion=2&maxFiles=2"),
         Some("GET"),
         None,
         Some(0),
-        responseFormat
+        responseFormat,
+        includeEndStreamAction = includeEndStreamAction
       )
       var lines = response.split("\n")
       assert(lines.length == 5)
